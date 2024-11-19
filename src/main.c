@@ -17,6 +17,9 @@ char* username = "osemeter";
 
 #include "stm32f0xx.h"
 
+char matrix [64][32];
+int curX = 0;
+int curY = 0;
 void set_char_msg(int, char);
 void nano_wait(unsigned int);
 void game(void);
@@ -287,6 +290,34 @@ void spi1_enable_dma(void) {
     DMA1_Channel3->CCR |= DMA_CCR_EN;
 }
 
+
+//set RGB value at cursor location in matrix
+void write_matrix(int r, int g, int b)
+{
+    matrix[curY][curX / 8] |= r << ( 8 - curX % 8);
+    matrix[curY][curX / 8] &= r << (8 - curX % 8);
+
+    matrix[curY][curX / 8 + 8] |= g << (8 - curX % 8);
+    matrix[curY][curX / 8 + 8] &= g << (8 - curX % 8);
+
+    matrix[curY][curX / 8 + 16] |= b << (8 - curX % 8);
+    matrix[curY][curX / 8 + 16] &= b << (8 - curX % 8);
+}
+
+
+//get either R G or B value at cursor location
+void read_matrix(int rgb)
+{
+    int n;
+    if(rgb == 0)
+        n = 0;
+    else if(rgb == 1)
+        n = 8;
+    else
+        n = 16;
+
+    return matrix[curY][curX / 8 + n] & 1 << (8 - curX % 8);
+}
 //===========================================================================
 // Main function
 //===========================================================================
@@ -295,8 +326,6 @@ int main(void) {
     internal_clock();
     enable_ports();
     init_tim7();
-    int x = 0;
-    int y = 0;
     char event;
     init_spi1();
     spi1_init_oled();
@@ -305,19 +334,19 @@ int main(void) {
     for(;;)
     {
         event = get_keypress();
-        if(event == 'A' && x <64)
-            x++;
-        else if(event == 'B' && x > 0)
-            x--;
-        else if(event == '*' && y > 0)
-            y--;
-        else if(event == '0' && y < 64)
-            y++;
+        if(event == 'A' && curX <64)
+            curX++;
+        else if(event == 'B' && curX > 0)
+            curX--;
+        else if(event == '*' && curY > 0)
+            curY--;
+        else if(event == '0' && curY < 64)
+            curY++;
         spi1_display1("Cursor: ");
-        myString[3] = (char)(x % 10 + 48);
-        myString[2] = (char)(x / 10 + 48);
-        myString[8] = (char)(y % 10 + 48);
-        myString[7] = (char)(y / 10 + 48);
+        myString[3] = (char)(curX % 10 + 48);
+        myString[2] = (char)(curX / 10 + 48);
+        myString[8] = (char)(curY % 10 + 48);
+        myString[7] = (char)(curY / 10 + 48);
         spi1_display2(myString);
     }
 }
