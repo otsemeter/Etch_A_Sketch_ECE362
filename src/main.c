@@ -350,7 +350,7 @@ int main(void) {
             curY++;
         
         write_matrix(1, 0, 1);
-        char rgb[] = {'r', '=', (char)(read_matrix(0) + 48), 'g', '=', (char)(read_matrix(1) + 48), 'b', '=', (char)(read_matrix(2) + 48)};
+        char rgb[] = {'r', '=', (char)(read_matrix(0) + 48), ' ', 'g', '=', (char)(read_matrix(1) + 48), 'b', '=', (char)(read_matrix(2) + 48)};
         spi1_display1(rgb);
         myString[3] = (char)(curX % 10 + 48);
         myString[2] = (char)(curX / 10 + 48);
