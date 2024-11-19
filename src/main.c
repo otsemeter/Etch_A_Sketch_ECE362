@@ -17,7 +17,7 @@ char* username = "osemeter";
 
 #include "stm32f0xx.h"
 
-char matrix [64][32];
+char matrix [64][25];
 int curX = 0;
 int curY = 0;
 void set_char_msg(int, char);
@@ -294,19 +294,25 @@ void spi1_enable_dma(void) {
 //set RGB value at cursor location in matrix
 void write_matrix(int r, int g, int b)
 {
-    matrix[curY][curX / 8] |= r << ( 8 - curX % 8);
-    matrix[curY][curX / 8] &= r << (8 - curX % 8);
+    if(r)
+        matrix[curY][curX / 8] |= 0x1 << (7 - curX % 8);
+    else
+        matrix[curY][curX / 8] &= ~(0x1 << (7 - curX % 8));
 
-    matrix[curY][curX / 8 + 8] |= g << (8 - curX % 8);
-    matrix[curY][curX / 8 + 8] &= g << (8 - curX % 8);
-
-    matrix[curY][curX / 8 + 16] |= b << (8 - curX % 8);
-    matrix[curY][curX / 8 + 16] &= b << (8 - curX % 8);
+     if(g)
+        matrix[curY][curX / 8 + 8] |= 0x1 << (7 - curX % 8);
+    else
+        matrix[curY][curX / 8 + 8] &= ~(0x1 << (7 - curX % 8));
+    
+     if(b)
+        matrix[curY][curX / 8 + 16] |= 0x1 << (7 - curX % 8);
+    else
+        matrix[curY][curX / 8 + 16] &= ~(0x1 << (7 - curX % 8));
 }
 
 
 //get either R G or B value at cursor location
-void read_matrix(int rgb)
+int read_matrix(int rgb)
 {
     int n;
     if(rgb == 0)
@@ -316,7 +322,7 @@ void read_matrix(int rgb)
     else
         n = 16;
 
-    return matrix[curY][curX / 8 + n] & 1 << (8 - curX % 8);
+    return (matrix[curY][curX / 8 + n] & 1 << (7 - curX % 8)) >> (7 - curX % 8);
 }
 //===========================================================================
 // Main function
@@ -342,7 +348,10 @@ int main(void) {
             curY--;
         else if(event == '0' && curY < 64)
             curY++;
-        spi1_display1("Cursor: ");
+        
+        write_matrix(1, 0, 1);
+        char rgb[] = {'r', '=', (char)(read_matrix(0) + 48), 'g', '=', (char)(read_matrix(1) + 48), 'b', '=', (char)(read_matrix(2) + 48)};
+        spi1_display1(rgb);
         myString[3] = (char)(curX % 10 + 48);
         myString[2] = (char)(curX / 10 + 48);
         myString[8] = (char)(curY % 10 + 48);
