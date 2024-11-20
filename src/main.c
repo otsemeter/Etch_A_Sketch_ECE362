@@ -340,7 +340,7 @@ iterating through the led matrix to update each row*/
 void update_led_matrix(void) {
     int row_num, col_num, bit_num;
     uint8_t byte_num;
-    
+
     // go through each row at a time
     for(row_num = 0; row_num < 64; row_num++) {
 
@@ -362,7 +362,25 @@ void update_led_matrix(void) {
     return;
 }
 
+// add a the shake/clear function
+void shake(void) {
 
+}
+
+// add save function 
+void save_sketch(void){
+
+}
+
+// add reload function
+void reload_sketch(void){
+
+}
+
+// add delete function
+void delete_sketch(void){
+    
+}
 
 //===========================================================================
 // Main function
