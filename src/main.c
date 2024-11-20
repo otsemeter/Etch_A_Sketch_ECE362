@@ -345,7 +345,7 @@ void update_led_matrix(void) {
     for(row_num = 0; row_num < 64; row_num++) {
 
         // each byte/column in the current row
-        for(col_num = 0; col_num < 25; col++) {
+        for(col_num = 0; col_num < 25; col_num++) {
 
             byte_num = matrix[row_num][col_num];    // gets the byte from each column
 
@@ -364,12 +364,41 @@ void update_led_matrix(void) {
 
 // add a the shake/clear function
 void shake(void) {
-
+    memset(matrix, 0, sizeof(matrix));
+    curX = curY = 0; // Reset cursor
+    update_led_matrix();
+    spi1_display1("Sketch cleared!");
 }
 
 // add save function 
 void save_sketch(void){
+    /*uint8_t row_buffer[24]; // Temporary buffer for 1 row's data
 
+    for (int i = 0; i < 64; i++) {
+        // Pack RGB data for the row into the buffer
+        for (int j = 0; j < 64; j++) {
+            int bit_position = 7 - (j % 8); // Position within a byte
+            int byte_index = j / 8;        // Byte index for the row
+            if (matrix[i][j / 8] & (1 << bit_position)) {
+                row_buffer[byte_index] |= (1 << bit_position); // Red
+            }
+            if (matrix[i][j / 8 + 8] & (1 << bit_position)) {
+                row_buffer[byte_index + 8] |= (1 << bit_position); // Green
+            }
+            if (matrix[i][j / 8 + 16] & (1 << bit_position)) {
+                row_buffer[byte_index + 16] |= (1 << bit_position); // Blue
+            }
+        }
+
+        // Write the packed row to EEPROM
+        for (int k = 0; k < 24; k++) {
+            I2C1_Start(EEPROM_ADDRESS << 1, 1, 2); // Start write
+            I2C1_Transmit(i * 24 + k);            // EEPROM address
+            I2C1_Transmit(row_buffer[k]);         // Write byte
+            I2C1_Stop();
+        }
+    }
+    spi1_display1("Saved!"); */
 }
 
 // add reload function
@@ -417,3 +446,41 @@ int main(void) {
         spi1_display2(myString);
     }
 }
+
+/*
+int selected_r = 0; // Red component (0 or 1)
+int selected_g = 0; // Green component (0 or 1)
+int selected_b = 0; // Blue component (0 or 1)
+
+if (event == 'A') { // Toggle Red
+        selected_r = !selected_r;
+        spi1_display1(selected_r ? "Red ON" : "Red OFF");
+    } else if (event == 'B') { // Toggle Green
+        selected_g = !selected_g;
+        spi1_display1(selected_g ? "Green ON" : "Green OFF");
+    } else if (event == 'C') { // Toggle Blue
+        selected_b = !selected_b;
+        spi1_display1(selected_b ? "Blue ON" : "Blue OFF");
+    }
+
+    // Move the cursor and draw
+    if (event == '6' && curX < 64)
+        curX++;
+    else if (event == '4' && curX > 0)
+        curX--;
+    else if (event == '5' && curY > 0)
+        curY--;
+    else if (event == '2' && curY < 64)
+        curY++;
+        
+        
+    if (event == 'D') {
+        save_sketch(); // Save the current sketch
+        spi1_display1("Saved!");
+    } else if (event == '#') {
+        reload_sketch(); // Reload saved sketch
+        spi1_display1("Reloaded!");
+    } else if (event == '*') {
+        delete_sketch(); // Clear sketch
+        spi1_display1("Deleted!");
+    }*/
