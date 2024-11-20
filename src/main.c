@@ -324,6 +324,46 @@ int read_matrix(int rgb)
 
     return (matrix[curY][curX / 8 + n] & 1 << (7 - curX % 8)) >> (7 - curX % 8);
 }
+
+
+//===========================================================================
+// an update the led matrix function to be called everytime the cursor moves (i think?)
+//===========================================================================
+/* the logic here could be a little wrong based on my understanding of bb_write_bit and whether 
+or not that's what's interacting with the led matrix? but generally this should be the right idea for 
+iterating through the led matrix to update each row*/
+//===========================================================================
+// ADDITIONALLY this needs to be implemented in main in some way, similar to an interrupt? i'm not sure yet
+
+// specifically works by going through the matrix and sending each bit to the led matrix through bb_write_bit
+// if the matrix was changed by the cursor moving, it should update the led matrix 
+void update_led_matrix(void) {
+    int row_num, col_num, bit_num;
+    uint8_t byte_num;
+    
+    // go through each row at a time
+    for(row_num = 0; row_num < 64; row_num++) {
+
+        // each byte/column in the current row
+        for(col_num = 0; col_num < 25; col++) {
+
+            byte_num = matrix[row_num][col_num];    // gets the byte from each column
+
+            // iterate through each bit of the current byte (most sig to least sig bit)
+            for(bit_num = 7; bit_num >= 0; bit_num--){
+
+                // IM NOT SURE IF THIS IS CORRECTLY TAKING INTO ACCOUNT THE RGB VALUE
+                bb_write_bit((byte_num >> bit_num) & 1);    // isolated bit it sent to bb_write_bit which sends it to the LED matrix
+            }
+        }
+
+        small_delay();  // short delay between processing rows to ensure it works well
+    }
+    return;
+}
+
+
+
 //===========================================================================
 // Main function
 //===========================================================================
