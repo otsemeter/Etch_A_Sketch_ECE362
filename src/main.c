@@ -20,6 +20,13 @@ char* username = "osemeter";
 char matrix [64][25];
 int curX = 0;
 int curY = 0;
+void init_i2c();
+void enable_ports();
+void i2c_start(uint32_t targadr, uint8_t size, uint8_t dir);
+void i2c_stop();
+void i2c_waitidle();
+void i2c_clearnack();
+int i2c_checknack();
 void set_char_msg(int, char);
 void nano_wait(unsigned int);
 void game(void);
@@ -33,13 +40,239 @@ void autotest();
 void enable_ports(void) {
     // Only enable port C for the keypad
     RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+    RCC->APB1ENR |= RCC_APB1ENR_I2C2EN;
     GPIOC->MODER &= ~0xffff;
     GPIOC->MODER |= 0x55 << (4*2);
     GPIOC->OTYPER &= ~0xff;
     GPIOC->OTYPER |= 0xf0;
     GPIOC->PUPDR &= ~0xff;
     GPIOC->PUPDR |= 0x55;
+
+    GPIOA->MODER &= ~(GPIO_MODER_MODER11 | GPIO_MODER_MODER12);
+    GPIOA->MODER |= (GPIO_MODER_MODER11_1 | GPIO_MODER_MODER12_1);
+
+    GPIOA->AFR[1] &= ~0x000FF000;
+    GPIOA->AFR[1] |= 0x00055000;
 }
+
+
+
+// I2C stuff:
+
+void init_i2c(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_I2C2EN;
+
+    I2C2->CR1 &= ~I2C_CR1_PE; // I2C disabled
+    I2C2->CR1 |= I2C_CR1_ANFOFF;
+    I2C2->CR1 |= I2C_CR1_ERRIE;
+    // I2C2->CR1 |= I2C_CR1_ERRIE | I2C_CR1_NACKIE | I2C_CR1_STOPIE;
+    I2C2->CR1 |= I2C_CR1_NOSTRETCH;
+
+    // PRESC = 5 (divides 48 MHz by (PRESC + 1) to 8 MHz for I2CCLK)
+    // SCLL = 0x09 (for the low period of SCL clock)
+    // SCLH = 0x03 (for the high period of SCL clock)
+    // SDADEL = 0x01 (data delay after SDA rising edge)
+    // SCLDEL = 0x03 (delay between SDA and SCL change)
+    I2C2->TIMINGR = (5 << 28) | (0x03 << 20) | (0x09 << 0) | (0x01 << 16) | (0x03 << 8);
+
+    I2C2->CR2 &= ~I2C_CR2_ADD10;  // Set to 7-bit addressing mode
+    I2C2->CR2 &= ~I2C_CR2_AUTOEND; // Automatically send STOP condition after the last byte
+
+    I2C2->CR1 |= I2C_CR1_PE;
+}
+
+void i2c_start(uint32_t targadr, uint8_t size, uint8_t dir) {
+    uint32_t tmpreg = I2C2->CR2;
+
+    // Clear SADD, NBYTES, RD_WRN, START, STOP
+    tmpreg &= ~(I2C_CR2_SADD | I2C_CR2_NBYTES | I2C_CR2_RD_WRN | I2C_CR2_START | I2C_CR2_STOP);
+
+    // Set read/write direction in tmpreg.
+    if (dir == 1) {
+        tmpreg |= I2C_CR2_RD_WRN; 
+    } else {
+        tmpreg &= ~I2C_CR2_RD_WRN;
+    }
+
+    // 3. Set the target's address in SADD (shift targadr left by 1 bit) and the data size.
+    tmpreg |= ((targadr<<1) & I2C_CR2_SADD) | ((size << 16) & I2C_CR2_NBYTES);
+
+    // 4. Set the START bit.
+    tmpreg |= I2C_CR2_START;
+
+    // 5. Start the conversion by writing the modified value back to the CR2 register.
+    I2C2->CR2 = tmpreg;
+}
+
+void i2c_stop(void) {
+    // 0. If a STOP bit has already been sent, return from the function.
+    // Check the I2C2 ISR register for the corresponding bit.
+    if (I2C2->ISR & I2C_ISR_STOPF) {
+        return;
+    }
+
+    // 1. Set the STOP bit in the CR2 register.
+    I2C2->CR2 |= I2C_CR2_STOP;
+
+    // 2. Wait until STOPF flag is (re???)set by checking the same flag in ISR.
+    while (!(I2C2->ISR & I2C_ISR_STOPF));
+
+    // 3. Clear the STOPF flag by writing 1 to the corresponding bit in the ICR.
+    I2C2->ICR |= I2C_ICR_STOPCF;
+}
+
+void i2c_waitidle(void) {
+    // nano_wait(1000000000000);
+    while (I2C2->ISR & I2C_ISR_BUSY);
+}
+
+int8_t i2c_senddata(uint8_t targadr, uint8_t data[], uint8_t size) {
+    
+    // printf("in senddata\n");
+    // 1. Wait until the I2C bus is idle
+    i2c_waitidle();
+    // printf("WRITE now idle\n");
+
+    // printf("not idle\n");
+    // 2. Send a START condition with the target address and write bit
+    i2c_start(targadr, size, 0);  // 0 indicates a write operation
+
+    // printf("WRITE start bit sent\n");
+
+    for (uint8_t i = 0; i < size; i++) {
+
+        int count = 0;
+        while ((I2C2->ISR & I2C_ISR_TXIS) == 0) {
+            count += 1;
+            if (count > 1000000) {
+                printf("SEND timeout\n");
+                return -1;
+            }
+            if (i2c_checknack()) {
+                printf("SEND first nack\n");
+                i2c_clearnack();
+                i2c_stop();
+                return -1;
+            }
+        }
+        // volatile char curr = data[i];
+
+        printf("Writing (%d) %d (%c)\n", i, data[i] & I2C_TXDR_TXDATA, (char)(data[i] & I2C_TXDR_TXDATA));
+        // printf("\n");
+        I2C2->TXDR = data[i] & I2C_TXDR_TXDATA;
+        // printf("writing %d (%c)\n", data[i], data[i]);
+    }
+
+    // printf("through loop\n");
+
+    while (!(I2C2->ISR & I2C_ISR_TC) && !(I2C2->ISR & I2C_ISR_NACKF));
+
+    // printf("TC and NAKKF flags not set\n");
+
+    if (I2C2->ISR & I2C_ISR_NACKF) {
+        printf("SEND last nack\n");
+        // i2c_stop();
+        // i2c_clearnack();
+        return -1;  // No acknowledgment error
+    }
+
+    i2c_stop();
+
+    return 0;
+}
+
+int i2c_recvdata(uint8_t targadr, uint8_t *data, uint8_t size) {
+
+    // printf("here\n");
+    // uint8_t *byte_data = (uint8_t*)data;  // Cast void* to uint8_t* for byte-wise access
+
+    i2c_waitidle();
+    // printf("READ now idle\n");
+
+    // 2. Send a START condition with the target address and read bit (1)
+    i2c_start(targadr, size, 1);  // 1 indicates a read operation
+    // printf("READ start bit sent\n");
+
+    // 3. Loop through each byte of data to receive
+    for (uint8_t i = 0; i < size; i++) {
+        // Wait until RXNE flag is set, or timeout if it takes too long
+        int count = 0;
+        while ((I2C2->ISR & I2C_ISR_RXNE) == 0) {
+            count++;
+            if (count > 1000000) {
+                printf("RECV timeout\n");
+                return -1;  // Timeout error
+            }
+            if (i2c_checknack()) {
+                printf("RECV nack\n");
+                i2c_clearnack();
+                i2c_stop();
+                return -1;  // NACK error
+            }
+        }
+
+        // 4. Mask the received data in RXDR with I2C_RXDR_RXDATA to ensure it is 8 bits,
+        //    then store it in the data buffer
+        // byte_data[i] = I2C2->RXDR & I2C_RXDR_RXDATA;
+        data[i] = I2C2->RXDR & I2C_RXDR_RXDATA;
+
+        // printf("\n");
+        printf("Reading (%d) %d (%c)\n", i, data[i], (char)(data[i]));
+    }
+
+    while(!(I2C2->ISR & I2C_ISR_TC) && !(I2C2->ISR & I2C_ISR_NACKF));
+
+    if (!((I2C2->ISR & I2C_ISR_NACKF) == 0)) {
+        return -1;
+    }
+    // // 5. Send a STOP condition after receiving all the data
+    i2c_stop();
+
+    return 0;  // Success
+}
+
+void i2c_clearnack(void) {
+    I2C2->ICR |= I2C_ICR_NACKCF;
+}
+
+int i2c_checknack(void) {
+    if (I2C2->ISR & I2C_ISR_NACKF) {
+        return 1;  // NACK received
+    }
+    return 0;  // No NACK
+}
+
+#define EEPROM_ADDR 0x57
+
+void eeprom_write(uint16_t loc, const char* data, uint8_t len) {
+    printf("Starting Write\n");
+    // printf("in eeprom write: loc: %d, data: %s, len: %d\n", loc, data, len);
+    uint8_t bytes[34];
+    bytes[0] = loc>>8;
+    bytes[1] = loc&0xFF;
+    for(int i = 0; i<len; i++){
+        bytes[i+2] = data[i];
+    }
+    i2c_senddata(EEPROM_ADDR, bytes, len+2);
+    printf("Done Writing\n");
+}
+
+void eeprom_read(uint16_t loc, char data[], uint8_t len) {
+    // ... your code here
+    // printf("in eeprom read: loc: %d, %s, len: %d\n", loc, data, len);
+    printf("Starting Read\n");
+    uint8_t bytes[2];
+    bytes[0] = loc>>8;
+    bytes[1] = loc&0xFF;
+    i2c_senddata(EEPROM_ADDR, bytes, 2);
+    i2c_recvdata(EEPROM_ADDR, data, len);
+    printf("Done Reading\n");
+}
+
+// // end I2C stuff:
+
+
 
 
 uint8_t col; // the column being scanned
@@ -292,124 +525,220 @@ void spi1_enable_dma(void) {
 
 
 //set RGB value at cursor location in matrix
-void write_matrix(int r, int g, int b)
+void write_matrix(int rgb)
 {
-    if(r)
-        matrix[curY][curX / 8] |= 0x1 << (7 - curX % 8);
-    else
-        matrix[curY][curX / 8] &= ~(0x1 << (7 - curX % 8));
-
-     if(g)
-        matrix[curY][curX / 8 + 8] |= 0x1 << (7 - curX % 8);
-    else
-        matrix[curY][curX / 8 + 8] &= ~(0x1 << (7 - curX % 8));
-    
-     if(b)
-        matrix[curY][curX / 8 + 16] |= 0x1 << (7 - curX % 8);
-    else
-        matrix[curY][curX / 8 + 16] &= ~(0x1 << (7 - curX % 8));
+    matrix[curY][curX] = rgb;
 }
 
 
-//get either R G or B value at cursor location
-int read_matrix(int rgb)
+/*
+function to flash a row of the matrix.
+Selects the input row, and then buffers in the rgb
+values stord in "matrix" at that row
+*/
+void display_row(int row)
 {
-    int n;
-    if(rgb == 0)
-        n = 0;
-    else if(rgb == 1)
-        n = 8;
-    else
-        n = 16;
+    /*
+    board displays two rows at a time, the selected
+    row and the row below it. To maximize brightness,
+    flash both
+    */
+    for (int j = -1; j < 1; j++)
+    {
+        //reset enable bit
+        GPIOB->ODR |= 1 << 13;
 
-    return (matrix[curY][curX / 8 + n] & 1 << (7 - curX % 8)) >> (7 - curX % 8);
+        //reset data values
+        GPIOB->ODR &= ~0b111111111111;
+
+        //release latch
+        GPIOB->ODR |= 1 << 12;
+
+        //select current row, inverting y such that y++ is up, instead of down
+        GPIOB->ODR |= (63 - row + j) << 6;
+
+        //buffer in all zeros to clear the line
+        for (int i = 0; i < 64; i++)
+        {
+            GPIOB->ODR |= 1 << 11;
+            GPIOB->ODR &= ~(1 << 11);
+        }
+        //reset rgb[0:1] then set is to val stored in matrix at current location
+        for (int i = 0; i < 64; i++)
+        {
+            GPIOB->ODR &= ~0b111111;
+            GPIOB->ODR |= matrix[row][i] << (row >= 32 ? 0 : 3); //shift from r1g1b1 to r2g2b2 if y is below half way
+            GPIOB->ODR |= 1 << 11;
+            GPIOB->ODR &= ~(1 << 11);
+        }
+        //set latch
+        GPIOB->ODR &= ~(1 << 12);
+
+        //enable the row
+        GPIOB->ODR &= ~(1 << 13);
+    }
 }
 
+/* similar to display row:
+selects the row of the cursor's Y position, and then buffers in
+0's until the cursor's x position. Sets the cursor x position color
+and then buffers in zeros until end of line
+*/
+void display_cursor()
+{
+    //disable row
+    GPIOB->ODR |= 1 << 13;
+    //board displays selected row and 1 below
+    //loop over row above and current row so that
+    //the current row is brighter
+    for (int j = -1; j < 1; j++)
+    {
+        GPIOB->ODR &= ~0b111111111111; //reset data vals
+        GPIOB->ODR |= 1 << 12; //reset latch
 
-//===========================================================================
-// an update the led matrix function to be called everytime the cursor moves (i think?)
-//===========================================================================
-/* the logic here could be a little wrong based on my understanding of bb_write_bit and whether 
-or not that's what's interacting with the led matrix? but generally this should be the right idea for 
-iterating through the led matrix to update each row*/
-//===========================================================================
-// ADDITIONALLY this needs to be implemented in main in some way, similar to an interrupt? i'm not sure yet
+        /*
+        R1 G1 B1 is color for top half, R2 G2 B2 is color for bottom
+        set the color to be either 000111 = white top half, or 
+        111000 = white bottom half depending on cursor Y value
+        */
+        int color = 0b111 << ((curY >= 32) ? 0 : 3);
+        GPIOB->ODR |= (63 - curY + j) << 6; //invert matrix so y++ is up not down then set corresponding ODR vals
 
-// specifically works by going through the matrix and sending each bit to the led matrix through bb_write_bit
-// if the matrix was changed by the cursor moving, it should update the led matrix 
-void update_led_matrix(void) {
-    int row_num, col_num, bit_num;
-    uint8_t byte_num;
+        //clear row
+        for (int i = 0; i < 64; i++)
+        {
+            GPIOB->ODR |= 1 << 11;
+            GPIOB->ODR &= ~(1 << 11);
+        }
+        //buffer zeros until cursor x position
+        for (int i = 0; i < curX; i++)
+        {
+            GPIOB->ODR |= 1 << 11;
+            GPIOB->ODR &= ~(1 << 11);
+        }
+        
+        //set rgb[0:1] to color
+        //then buffer in
+        GPIOB->ODR |= color;
+        GPIOB->ODR |= 1 << 11;
+        GPIOB->ODR &= ~(1 << 11);
 
-    // go through each row at a time
-    for(row_num = 0; row_num < 64; row_num++) {
-
-        // each byte/column in the current row
-        for(col_num = 0; col_num < 25; col_num++) {
-
-            byte_num = matrix[row_num][col_num];    // gets the byte from each column
-
-            // iterate through each bit of the current byte (most sig to least sig bit)
-            for(bit_num = 7; bit_num >= 0; bit_num--){
-
-                // IM NOT SURE IF THIS IS CORRECTLY TAKING INTO ACCOUNT THE RGB VALUE
-                bb_write_bit((byte_num >> bit_num) & 1);    // isolated bit it sent to bb_write_bit which sends it to the LED matrix
-            }
+        //reset rgb[0:1] to all blank
+        //and buffer into matrix until end of line
+        GPIOB->ODR &= ~(0b111111);
+        for (int i = curX + 1; i < 64; i++)
+        {
+            GPIOB->ODR |= 1 << 11;
+            GPIOB->ODR &= ~(1 << 11);
         }
 
-        small_delay();  // short delay between processing rows to ensure it works well
+        //set latch
+        GPIOB->ODR &= ~(1 << 12); 
     }
-    return;
+
+    //enable line
+    GPIOB->ODR &= ~(1 << 13);
 }
 
-// add a the shake/clear function
-void shake(void) {
-    memset(matrix, 0, sizeof(matrix));
-    curX = curY = 0; // Reset cursor
-    update_led_matrix();
-    spi1_display1("Sketch cleared!");
+// whatever default vals we want displayed: could be all blank, or something else
+void init_matrix()
+{
+    for (int i = 0; i < 64; i++)
+    {
+        for (int j = 0; j < 64; j++)
+        {
+            matrix[i][j] = 0;
+        }
+    }
 }
 
-// add save function 
-void save_sketch(void){
-    /*uint8_t row_buffer[24]; // Temporary buffer for 1 row's data
-
+void save_sketch() {
+    uint16_t addr = 0; // Start of EEPROM memory
     for (int i = 0; i < 64; i++) {
-        // Pack RGB data for the row into the buffer
+        uint8_t row_data[64];
         for (int j = 0; j < 64; j++) {
-            int bit_position = 7 - (j % 8); // Position within a byte
-            int byte_index = j / 8;        // Byte index for the row
-            if (matrix[i][j / 8] & (1 << bit_position)) {
-                row_buffer[byte_index] |= (1 << bit_position); // Red
-            }
-            if (matrix[i][j / 8 + 8] & (1 << bit_position)) {
-                row_buffer[byte_index + 8] |= (1 << bit_position); // Green
-            }
-            if (matrix[i][j / 8 + 16] & (1 << bit_position)) {
-                row_buffer[byte_index + 16] |= (1 << bit_position); // Blue
-            }
+            row_data[j] = matrix[i][j];
         }
+        eeprom_write(addr, (char *)row_data, 64);
+        addr += 64; // Move to the next row
+    }
+}
 
-        // Write the packed row to EEPROM
-        for (int k = 0; k < 24; k++) {
-            I2C1_Start(EEPROM_ADDRESS << 1, 1, 2); // Start write
-            I2C1_Transmit(i * 24 + k);            // EEPROM address
-            I2C1_Transmit(row_buffer[k]);         // Write byte
-            I2C1_Stop();
+void reload_sketch() {
+    uint16_t addr = 0; // Start of EEPROM memory
+    for (int i = 0; i < 64; i++) {
+        uint8_t row_data[64];
+        eeprom_read(addr, (char *)row_data, 64);
+        for (int j = 0; j < 64; j++) {
+            matrix[i][j] = row_data[j];
+        }
+        addr += 64; // Move to the next row
+    }
+}
+
+void delete_sketch() {
+    // Clear the in-memory matrix
+    for (int i = 0; i < 64; i++) {
+        for (int j = 0; j < 64; j++) {
+            matrix[i][j] = 0;
         }
     }
-    spi1_display1("Saved!"); */
+
+    // Optionally clear the EEPROM memory
+    uint16_t addr = 0; // Start of EEPROM memory
+    uint8_t clear_row[64] = {0};
+    for (int i = 0; i < 64; i++) {
+        eeprom_write(addr, (char *)clear_row, 64);
+        addr += 64; // Move to the next row
+    }
 }
 
-// add reload function
-void reload_sketch(void){
+void test_eeprom_functions() {
+    // Test initial save
+    for (int i = 0; i < 64; i++) {
+        for (int j = 0; j < 64; j++) {
+            matrix[i][j] = (i + j) % 8; // Fill matrix with a test pattern
+        }
+    }
+    save_sketch();
+    spi1_display1("Test Save Done");
 
+    // Clear the matrix and reload from EEPROM
+    for (int i = 0; i < 64; i++) {
+        for (int j = 0; j < 64; j++) {
+            matrix[i][j] = 0; // Clear matrix
+        }
+    }
+    reload_sketch();
+    spi1_display1("Test Reload Done");
+
+    // Verify the reloaded data matches the saved pattern
+    for (int i = 0; i < 64; i++) {
+        for (int j = 0; j < 64; j++) {
+            if (matrix[i][j] != (i + j) % 8) {
+                spi1_display1("Test Failed");
+                return;
+            }
+        }
+    }
+
+    // Delete the sketch
+    delete_sketch();
+    spi1_display1("Test Delete Done");
+
+    // Verify the matrix is cleared
+    for (int i = 0; i < 64; i++) {
+        for (int j = 0; j < 64; j++) {
+            if (matrix[i][j] != 0) {
+                spi1_display1("Test Failed");
+                return;
+            }
+        }
+    }
+
+    spi1_display1("All Tests Passed");
 }
 
-// add delete function
-void delete_sketch(void){
-    
-}
 
 //===========================================================================
 // Main function
@@ -418,27 +747,54 @@ void delete_sketch(void){
 int main(void) {
     internal_clock();
     enable_ports();
+    init_i2c();
     init_tim7();
-    char event;
     init_spi1();
     spi1_init_oled();
-    char myString [] = {'x', '=', '0', '0', ' ', 'y', '=', '0', '0', '\0'};
-    
-    for(;;)
-    {
+
+    int selected_r = 0, selected_g = 0, selected_b = 0;
+    char event;
+    char myString[] = {'x', '=', '0', '0', ' ', 'y', '=', '0', '0', '\0'};
+
+    for (;;) {
         event = get_keypress();
-        if(event == 'A' && curX <64)
+
+        if (event == 'A') {
+            selected_r = !selected_r;
+            spi1_display1(selected_r ? "Red ON" : "Red OFF");
+        } else if (event == 'B') {
+            selected_g = !selected_g;
+            spi1_display1(selected_g ? "Green ON" : "Green OFF");
+        } else if (event == 'C') {
+            selected_b = !selected_b;
+            spi1_display1(selected_b ? "Blue ON" : "Blue OFF");
+        }
+
+        if (event == '6' && curX < 63)
             curX++;
-        else if(event == 'B' && curX > 0)
+        else if (event == '4' && curX > 0)
             curX--;
-        else if(event == '*' && curY > 0)
+        else if (event == '5' && curY > 0)
             curY--;
-        else if(event == '0' && curY < 64)
+        else if (event == '2' && curY < 63)
             curY++;
-        
-        write_matrix(1, 0, 1);
-        char rgb[] = {'r', '=', (char)(read_matrix(0) + 48), ' ', 'g', '=', (char)(read_matrix(1) + 48), 'b', '=', (char)(read_matrix(2) + 48)};
-        spi1_display1(rgb);
+
+        if (event == 'D') {
+            save_sketch();
+            spi1_display1("Saved!");
+        } else if (event == '#') {
+            reload_sketch();
+            spi1_display1("Reloaded!");
+        } else if (event == '*') {
+            delete_sketch();
+            spi1_display1("Deleted!");
+        } else if (event == '1') {  // Trigger the EEPROM test function
+            test_eeprom_functions();
+        }
+
+        write_matrix(selected_r | (selected_g << 1) | (selected_b << 2));
+        display_cursor();
+
         myString[3] = (char)(curX % 10 + 48);
         myString[2] = (char)(curX / 10 + 48);
         myString[8] = (char)(curY % 10 + 48);
@@ -447,40 +803,3 @@ int main(void) {
     }
 }
 
-/*
-int selected_r = 0; // Red component (0 or 1)
-int selected_g = 0; // Green component (0 or 1)
-int selected_b = 0; // Blue component (0 or 1)
-
-if (event == 'A') { // Toggle Red
-        selected_r = !selected_r;
-        spi1_display1(selected_r ? "Red ON" : "Red OFF");
-    } else if (event == 'B') { // Toggle Green
-        selected_g = !selected_g;
-        spi1_display1(selected_g ? "Green ON" : "Green OFF");
-    } else if (event == 'C') { // Toggle Blue
-        selected_b = !selected_b;
-        spi1_display1(selected_b ? "Blue ON" : "Blue OFF");
-    }
-
-    // Move the cursor and draw
-    if (event == '6' && curX < 64)
-        curX++;
-    else if (event == '4' && curX > 0)
-        curX--;
-    else if (event == '5' && curY > 0)
-        curY--;
-    else if (event == '2' && curY < 64)
-        curY++;
-        
-        
-    if (event == 'D') {
-        save_sketch(); // Save the current sketch
-        spi1_display1("Saved!");
-    } else if (event == '#') {
-        reload_sketch(); // Reload saved sketch
-        spi1_display1("Reloaded!");
-    } else if (event == '*') {
-        delete_sketch(); // Clear sketch
-        spi1_display1("Deleted!");
-    }*/
